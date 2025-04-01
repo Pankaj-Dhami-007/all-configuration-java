@@ -1,0 +1,23 @@
+//package com.training.config;
+//
+//
+//import org.springframework.web.servlet.support.AbstractAnnotationConfigDispatcherServletInitializer;
+//
+//
+//public class WebAppInitializer extends AbstractAnnotationConfigDispatcherServletInitializer {
+//
+//    @Override
+//    protected Class<?>[] getRootConfigClasses() {
+//        return new Class[] { WebConfig.class }; // Register WebConfig
+//    }
+//
+//    @Override
+//    protected Class<?>[] getServletConfigClasses() {
+//        return null; // No additional servlet configuration needed
+//    }
+//
+//    @Override
+//    protected String[] getServletMappings() {
+//        return new String[] { "/" }; // Map all requests to Spring MVC
+//    }
+//}

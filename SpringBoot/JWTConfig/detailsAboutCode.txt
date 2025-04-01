@@ -1,0 +1,546 @@
+1. SecurityConfig Class
+Yeh class Spring Security configuration handle karti hai.
+
+Ismein SecurityFilterChain bean define kiya gaya hai, jo HTTP requests ko secure karta hai.
+
+@Configuration
+@EnableWebSecurity
+public class SecurityConfig {
+    @Autowired
+    private UserDetailsService userDetailsService;
+
+    @Autowired
+    private JwtRequestFilter requestFilter;
+
+    @Bean
+    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+        http.csrf(csrf -> csrf.disable())
+            .authorizeHttpRequests(request -> {
+                request.requestMatchers("/user/register", "/user/login").permitAll(); // Public endpoints
+                request.requestMatchers(HttpMethod.GET, "/**").permitAll(); // Public GET requests
+                request.anyRequest().authenticated(); // All other requests require authentication
+            })
+            .authenticationProvider(authenticationProvider())
+            .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS)) // Stateless session
+            .addFilterBefore(requestFilter, UsernamePasswordAuthenticationFilter.class); // Add JWT filter
+
+        return http.build();
+    }
+
+    @Bean
+    public PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder(); // Password encryption
+    }
+
+    @Bean
+    public AuthenticationProvider authenticationProvider() {
+        DaoAuthenticationProvider provider = new DaoAuthenticationProvider();
+        provider.setPasswordEncoder(new BCryptPasswordEncoder(12)); // Set password encoder
+        provider.setUserDetailsService(userDetailsService); // Set user details service
+        return provider;
+    }
+
+    @Bean
+    public AuthenticationManager authenticationManager(AuthenticationConfiguration configuration) throws Exception {
+        return configuration.getAuthenticationManager(); // Authentication manager
+    }
+}
+
+Key Points:
+
+SecurityFilterChain: Yeh method define karta hai ki kaun-se endpoints public hain aur kaun-se authenticated hone chahiye.
+
+authenticationProvider: Ye user authentication handle karta hai, UserDetailsService aur PasswordEncoder ka use karke.
+
+addFilterBefore: JWT filter ko add karta hai, jo har request se pehle chalega.
+
+
+2. JwtUtil Class
+Yeh class JWT tokens generate aur validate karne ke liye use hoti hai.
+
+@Component
+public class JwtUtil {
+    private static String secretKey;
+
+    public JwtUtil() {
+        SecureRandom random = new SecureRandom();
+        byte[] key = new byte[32]; // 256-bit key
+        random.nextBytes(key);
+        secretKey = Base64.getEncoder().encodeToString(key); // Generate secret key
+    }
+
+    public String generateToken(String username, List<String> roles) {
+        return Jwts.builder()
+            .setSubject(username) // Set username as subject
+            .claim("roles", roles) // Add roles to token
+            .setIssuedAt(new Date(System.currentTimeMillis())) // Set issue time
+            .setExpiration(new Date(System.currentTimeMillis() + 1000 * 60 * 2)) // Set expiration time (2 minutes)
+            .signWith(getSignedKey(), SignatureAlgorithm.HS256) // Sign token
+            .compact();
+    }
+
+    private Key getSignedKey() {
+        byte[] keyBytes = Decoders.BASE64.decode(secretKey);
+        return Keys.hmacShaKeyFor(keyBytes); // Generate signing key
+    }
+
+    public <T> T extractClaim(String token, Function<Claims, T> claimsResolver) {
+        final Claims claims = Jwts.parserBuilder()
+            .setSigningKey(getSignedKey())
+            .build()
+            .parseClaimsJws(token)
+            .getBody();
+        return claimsResolver.apply(claims); // Extract claims from token
+    }
+
+    public Boolean validToken(String token, String username) {
+        return (extractUsername(token).equals(username) && !isTokenExpired(token)); // Validate token
+    }
+
+    public String extractUsername(String token) {
+        return extractClaim(token, Claims::getSubject); // Extract username from token
+    }
+
+    public Date extractExpiration(String token) {
+        return extractClaim(token, Claims::getExpiration); // Extract expiration time
+    }
+
+    public Boolean isTokenExpired(String token) {
+        return extractExpiration(token).before(new Date()); // Check if token is expired
+    }
+
+    public List<String> extractRole(String token) {
+        return extractClaim(token, claims -> claims.get("roles", List.class)); // Extract roles from token
+    }
+}
+
+Key Points:
+
+generateToken: JWT token generate karta hai, jisme username aur roles include hote hain.
+
+validToken: Token ko validate karta hai, expiration aur username check karke.
+
+extractClaim: Token se specific claims extract karta hai.
+
+
+
+3. JwtRequestFilter Class
+Yeh class har incoming request ke liye JWT token ko validate karti hai.
+
+@Component
+public class JwtRequestFilter extends OncePerRequestFilter {
+    @Autowired
+    private JwtUtil jwtUtil;
+
+    @Autowired
+    private MyUserDetailsService userDetailsService;
+
+    @Override
+    protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
+            throws ServletException, IOException {
+        String authHeader = request.getHeader("Authorization");
+        String username = null;
+        String token = null;
+
+        if (authHeader != null && authHeader.startsWith("Bearer ")) {
+            token = authHeader.substring(7); // Extract token from header
+            username = jwtUtil.extractUsername(token); // Extract username from token
+        }
+
+        if (username != null && SecurityContextHolder.getContext().getAuthentication() == null) {
+            UserDetails userDetails = userDetailsService.loadUserByUsername(username); // Load user details
+            if (userDetails != null) {
+                List<String> roles = jwtUtil.extractRole(token); // Extract roles from token
+                List<SimpleGrantedAuthority> authorities = roles.stream()
+                    .map(role -> new SimpleGrantedAuthority(role))
+                    .toList();
+
+                if (jwtUtil.validToken(token, userDetails.getUsername())) { // Validate token
+                    UsernamePasswordAuthenticationToken authToken =
+                        new UsernamePasswordAuthenticationToken(userDetails, null, authorities);
+                    authToken.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
+                    SecurityContextHolder.getContext().setAuthentication(authToken); // Set authentication
+                }
+            }
+        }
+        filterChain.doFilter(request, response); // Continue filter chain
+    }
+}
+
+Key Points:
+
+doFilterInternal: Har request ke liye JWT token ko validate karta hai aur authentication set karta hai.
+
+SecurityContextHolder: Current user ki authentication details store karta hai.
+
+
+
+
+4. UserPrincipal Class
+Yeh class UserDetails interface ko implement karti hai, jo user ki details provide karti hai.
+
+public class UserPrincipal implements UserDetails {
+    private User user;
+
+    public UserPrincipal(User user) {
+        this.user = user;
+    }
+
+    @Override
+    public Collection<? extends GrantedAuthority> getAuthorities() {
+        return List.of(new SimpleGrantedAuthority("ROLE_ADMIN")); // User roles
+    }
+
+    @Override
+    public String getPassword() {
+        return user.getPassword(); // User password
+    }
+
+    @Override
+    public String getUsername() {
+        return user.getUsername(); // Username
+    }
+}
+
+Key Points:
+
+getAuthorities: User ki roles return karta hai.
+
+getUsername aur getPassword: User ki credentials provide karta hai.
+
+
+5. MyUserDetailsService Class
+Yeh class UserDetailsService ko implement karti hai, jo database se user details fetch karti hai.
+
+
+@Service
+public class MyUserDetailsService implements UserDetailsService {
+    @Autowired
+    private UserRepository userRepository;
+
+    public User createUser(User user) {
+        user.setPassword(new BCryptPasswordEncoder(12).encode(user.getPassword())); // Encrypt password
+        return userRepository.save(user); // Save user to database
+    }
+
+    @Override
+    public UserDetails loadUserByUsername(String username) throws UsernameNotFoundException {
+        Optional<User> user = userRepository.findByUsername(username); // Find user by username
+        if (user.isEmpty()) throw new UsernameNotFoundException("User Not found");
+        return new UserPrincipal(user.get()); // Return UserPrincipal
+    }
+}
+
+
+Key Points:
+
+loadUserByUsername: Database se user details fetch karta hai.
+
+createUser: New user create karta hai aur password encrypt karta hai.
+
+
+
+************
+
+Control Flow:
+User Register/Login:
+
+/user/register aur /user/login endpoints public hain, jahan user register ya login kar sakta hai.
+
+Login successful hone par JWT token generate hota hai.
+
+JWT Token Validation:
+
+Har request ke liye JwtRequestFilter JWT token ko validate karta hai.
+
+Agar token valid hai, toh SecurityContextHolder mein authentication set hota hai.
+
+Access Control:
+
+Authenticated users hi protected endpoints access kar sakte hain.
+
+************
+
+
+
+
+
+1. Conceptual Understanding (Sabse Important):
+JWT kaise kaam karta hai?
+
+JWT ek encoded string hota hai, jisme user ki details (username, roles, expiration time) hoti hain.
+
+Yeh token server generate karta hai aur client (browser ya app) use karta hai har request ke saath.
+
+Spring Security kaise kaam karti hai?
+
+Spring Security HTTP requests ko filter karti hai aur unhe secure karti hai.
+
+Yeh authentication (user verify karna) aur authorization (user ke permissions check karna) handle karti hai.
+
+
+
+2. Code Structure ko Break Karein:
+Code ko chhote-chhote parts mein divide karein aur har part ka role samjhein.
+
+Example:
+
+SecurityConfig: Yeh configuration class hai, jo bataati hai ki kaun-se endpoints public hain aur kaun-se secure.
+
+JwtUtil: Yeh JWT tokens generate aur validate karta hai.
+
+JwtRequestFilter: Yeh har request ke liye JWT token ko check karta hai.
+
+UserDetailsService: Yeh database se user details fetch karta hai.
+
+
+
+
+3. Flow ko Visualize Karein:
+Code ka flow visualize karein. Example:
+
+User /user/login par login karta hai.
+
+Server JWT token generate karta hai aur client ko bhejta hai.
+
+Client har request ke saath JWT token bhejta hai.
+
+JwtRequestFilter token ko validate karta hai.
+
+Agar token valid hai, toh request process hoti hai.
+
+
+
+
+4. Important Methods aur Unka Role:
+Har class ke important methods aur unka role yaad rakhein. Example:
+
+SecurityConfig Class:
+
+securityFilterChain(): Endpoints ko secure karta hai.
+
+authenticationProvider(): User authentication handle karta hai.
+
+JwtUtil Class:
+
+generateToken(): JWT token generate karta hai.
+
+validToken(): Token ko validate karta hai.
+
+JwtRequestFilter Class:
+
+doFilterInternal(): Har request ke liye token ko check karta hai.
+
+
+
+
+1. JWT Token - Cinema Ticket ki Tarah:
+Cinema Ticket ka Example:
+
+Jab aap cinema dekhte hain, toh aapko ek ticket milta hai.
+
+Us ticket par aapka naam, seat number, aur show time likha hota hai.
+
+Ticket valid hone par hi aap cinema hall mein ja sakte hain.
+
+JWT Token ka Connection:
+
+JWT Token bhi ek ticket ki tarah hota hai.
+
+Ismein user ki details (username, roles, expiration time) encoded hoti hain.
+
+Jab user login karta hai, toh server use ek JWT ticket (token) deta hai.
+
+Har baar jab user koi request karta hai, toh woh apna JWT ticket (token) server ko dikhata hai.
+
+Agar ticket valid hai (token valid hai), toh server request ko allow karta hai.
+
+Example:
+
+User login karta hai aur server use ek JWT token deta hai:
+
+{
+  "username": "john",
+  "roles": ["USER"],
+  "exp": 1698765432
+}
+Har request ke saath, yeh token server ko bheja jata hai:
+
+Authorization: Bearer <JWT Token>
+Server token ko check karta hai:
+
+Agar token valid hai (expired nahi hai aur username/roles sahi hain), toh request allow hoti hai.
+
+Agar token invalid hai, toh request reject ho jaati hai.
+
+
+
+
+
+2. Spring Security - Security Guard ki Tarah:
+Security Guard ka Example:
+
+Cinema hall ke bahar ek security guard hota hai.
+
+Woh har visitor ka ticket check karta hai.
+
+Agar ticket valid hai, toh visitor ko andar jaane deta hai.
+
+Agar ticket invalid hai, toh visitor ko andar nahi jaane deta.
+
+Spring Security ka Connection:
+
+Spring Security bhi ek security guard ki tarah kaam karti hai.
+
+Har incoming request ko check karti hai.
+
+Agar request mein valid JWT token hai, toh request ko allow karti hai.
+
+Agar request mein valid token nahi hai, toh request ko block kar deti hai.
+
+Example:
+
+Ek user /orders endpoint ko access karna chahta hai.
+
+Request mein JWT token hai:
+
+Authorization: Bearer <JWT Token>
+
+Spring Security (security guard) token ko check karti hai:
+
+Agar token valid hai, toh user ko /orders access karne deti hai.
+
+Agar token invalid hai, toh user ko access deny kar deti hai.
+
+
+
+
+3. Flow ko Real-Life Example ke Saath Samjhein:
+Step 1: User Login Karta Hai (Ticket Khareedna):
+
+User /user/login par login karta hai.
+
+Server use ek JWT token (cinema ticket) deta hai.
+
+Step 2: User Request Karta Hai (Cinema Hall Mein Jaana):
+
+User /orders (ya koi aur endpoint) access karna chahta hai.
+
+Request ke saath woh apna JWT token (cinema ticket) bhejta hai.
+
+Step 3: Spring Security Token Check Karti Hai (Security Guard):
+
+Spring Security token ko validate karti hai:
+
+Kya token valid hai? (Kya ticket valid hai?)
+
+Kya token expire nahi hua hai? (Kya ticket ka time khatam nahi hua hai?)
+
+Kya user ke paas sahi permissions hain? (Kya ticket par sahi seat number hai?)
+
+Step 4: Request Allow ya Block Hoti Hai:
+
+Agar token valid hai, toh request allow hoti hai (user cinema hall mein ja sakta hai).
+
+Agar token invalid hai, toh request block ho jaati hai (user cinema hall mein nahi ja sakta).
+
+
+
+
+4. Code ke Saath Connection:
+JWT Token Generate (Cinema Ticket Issue Karna):
+
+public String generateToken(String username, List<String> roles) {
+    return Jwts.builder()
+        .setSubject(username) // Username (Ticket par naam)
+        .claim("roles", roles) // Roles (Ticket par seat number)
+        .setIssuedAt(new Date()) // Issue time (Ticket issue ka time)
+        .setExpiration(new Date(System.currentTimeMillis() + 1000 * 60 * 2)) // Expiration time (Ticket ka expiry time)
+        .signWith(getSignedKey(), SignatureAlgorithm.HS256) // Signature (Ticket par security stamp)
+        .compact();
+}
+
+
+JWT Token Validate (Security Guard Ticket Check Karna):
+public Boolean validToken(String token, String username) {
+    return (extractUsername(token).equals(username) && !isTokenExpired(token));
+}
+
+
+
+Spring Security Filter (Security Guard):
+
+@Override
+protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
+        throws ServletException, IOException {
+    String authHeader = request.getHeader("Authorization");
+    String token = authHeader.substring(7); // Extract token (Ticket)
+    String username = jwtUtil.extractUsername(token); // Extract username (Ticket par naam)
+
+    if (jwtUtil.validToken(token, username)) { // Check token (Ticket check karna)
+        // Allow request (Cinema hall mein jaane dena)
+    } else {
+        // Block request (Cinema hall mein jaane se rokkna)
+    }
+}
+
+
+5. Real-Life Example ka Diagram:
+           User Login (Ticket Khareedna) --> Server JWT Token Issue Karta Hai (Ticket Dena)
+User Request Karta Hai (Cinema Hall Mein Jaana) --> Request ke Saath JWT Token Bhejta Hai (Ticket Dikhana)
+Spring Security Token Check Karti Hai (Security Guard Ticket Check Karna) --> Request Allow/Block Karti Hai (Andar Jaane Dena ya Rokna)
+
+
+
+
+6. Key Points:
+JWT Token = Cinema Ticket:
+
+Usmein user ki details hoti hain (username, roles, expiration time).
+
+Har request ke saath bheja jata hai.
+
+Spring Security = Security Guard:
+
+Har request ko check karti hai.
+
+Agar token valid hai, toh request allow karti hai.
+
+Agar token invalid hai, toh request block karti hai.
+
+
+
+
+                                                                  JWT vs OAuth 2.0:
+         JWT:
+
+Use Case: Authentication aur lightweight token-based communication.
+
+Example: Microservices, SPAs, Mobile Apps.
+
+Advantages: Stateless, lightweight, self-contained.
+
+Disadvantages: Token revocation mushkil hai, aur tokens ko securely store karna zaruri hai.
+
+          OAuth 2.0:
+
+Use Case: Third-party authentication aur delegated authorization.
+
+Example: "Sign in with Google", APIs access.
+
+Advantages: Secure, scalable, delegated authorization.
+
+Disadvantages: Complex to implement, aur refresh tokens ko securely handle karna zaruri hai.
+
+
+
+
+
+
+
+
+
+
+
+
+
